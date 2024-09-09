@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strings"
 
 	"github.com/aws/aws-sdk-go/aws/session"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
@@ -116,7 +117,7 @@ func writeTableToJson(svc dynamodbiface.DynamoDBAPI, tableName string) error {
 	unmarshalledResult := unmarshallResult(result)
 	json := marshallToJson(unmarshalledResult)
 
-	filePath := filepath.Join("./output/dynamodb", tableName+".json")
+	filePath := filepath.Join("../output/dynamodb", strings.Replace(tableName+".json", envName, "envName", 1))
 	fileDir := filepath.Dir(filePath)
 
 	if err := os.MkdirAll(fileDir, os.ModePerm); err != nil {
@@ -139,7 +140,7 @@ func downloadObject(svc s3iface.S3API, bucketName string, key string) error {
 	}
 	defer result.Body.Close()
 
-	filePath := filepath.Join("./output/s3/"+bucketName, key)
+	filePath := filepath.Join(strings.Replace("../output/s3/"+bucketName, envName, "envName", 1), key)
 	fileDir := filepath.Dir(filePath)
 
 	if err := os.MkdirAll(fileDir, os.ModePerm); err != nil {
