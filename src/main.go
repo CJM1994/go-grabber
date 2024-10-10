@@ -8,15 +8,21 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/aws/aws-sdk-go/aws"
 	"github.com/aws/aws-sdk-go/aws/session"
+	"github.com/aws/aws-sdk-go/service/cognitoidentityprovider"
+	"github.com/aws/aws-sdk-go/service/cognitoidentityprovider/cognitoidentityprovideriface"
 	"github.com/aws/aws-sdk-go/service/dynamodb"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbattribute"
 	"github.com/aws/aws-sdk-go/service/dynamodb/dynamodbiface"
 	"github.com/aws/aws-sdk-go/service/s3"
 	"github.com/aws/aws-sdk-go/service/s3/s3iface"
+	"github.com/aws/aws-sdk-go/service/ssm"
+	"github.com/aws/aws-sdk-go/service/ssm/ssmiface"
 )
 
-var envName = os.Args[1]
+var envName string = os.Args[1]
+var output string
 
 var tableNames = [17]string{
 	envName + "-contacts_api",
@@ -66,6 +72,30 @@ func newS3Client() s3iface.S3API {
 		os.Exit(1)
 	}
 	return s3.New(sess)
+}
+
+func newCognitoClient() cognitoidentityprovideriface.CognitoIdentityProviderAPI {
+	sess, err := session.NewSessionWithOptions(session.Options{
+		Profile:           "ingenio-dev",
+		SharedConfigState: session.SharedConfigEnable,
+	})
+	if err != nil {
+		log.Fatalf("session error, not created: %v", err)
+		os.Exit(1)
+	}
+	return cognitoidentityprovider.New(sess)
+}
+
+func newParameterStoreClient() ssmiface.SSMAPI {
+	sess, err := session.NewSessionWithOptions(session.Options{
+		Profile:           "ingenio-dev",
+		SharedConfigState: session.SharedConfigEnable,
+	})
+	if err != nil {
+		log.Fatalf("session error, not created: %v", err)
+		os.Exit(1)
+	}
+	return ssm.New(sess)
 }
 
 func scanDynamoDBTable(svc dynamodbiface.DynamoDBAPI, tableName string) *dynamodb.ScanOutput {
@@ -176,18 +206,89 @@ func downloadAllObjects(svc s3iface.S3API, bucketName string) error {
 	return nil
 }
 
+func writeCognitoToJson(svcCognito cognitoidentityprovideriface.CognitoIdentityProviderAPI, svcParameterStore ssmiface.SSMAPI) error {
+	parameterResult, err := svcParameterStore.GetParameter(&ssm.GetParameterInput{
+		Name:           aws.String("/" + envName + "/userPoolId"),
+		WithDecryption: aws.Bool(true),
+	})
+	if err != nil {
+		log.Fatalf("failed to get parameter: %v", err)
+	}
+	userPoolId := parameterResult.Parameter.Value
+
+	cognitoResult, err := svcCognito.ListUsers(&cognitoidentityprovider.ListUsersInput{
+		UserPoolId: userPoolId,
+	})
+	if err != nil {
+		log.Fatalf("failed to list users: %v", err)
+	}
+
+	type Attribute struct {
+		Name  string
+		Value string
+	}
+
+	users := make([]map[string]interface{}, len(cognitoResult.Users))
+	for i, user := range cognitoResult.Users {
+		userMap := make(map[string]interface{})
+		userMap["Username"] = *user.Username
+		userMap["UserCreateDate"] = user.UserCreateDate
+		userMap["UserLastModifiedDate"] = user.UserLastModifiedDate
+		userMap["Enabled"] = *user.Enabled
+		userMap["UserStatus"] = *user.UserStatus
+		attributes := make([]Attribute, len(user.Attributes))
+		for j, attr := range user.Attributes {
+			attributes[j] = Attribute{Name: *attr.Name, Value: *attr.Value}
+		}
+		userMap["Attributes"] = attributes
+		users[i] = userMap
+	}
+
+	json, err := json.Marshal(users)
+	if err != nil {
+		log.Fatalf("failed to marshal users: %v", err)
+	}
+
+	filePath := "../output/cognito/users.json"
+	fileDir := filepath.Dir(filePath)
+
+	if err := os.MkdirAll(fileDir, os.ModePerm); err != nil {
+		log.Fatalf("failed to created directories: %v", err)
+	}
+
+	writeJsonToFile(filePath, json)
+
+	return nil
+}
+
 func main() {
 	if len(os.Args) < 2 {
-		log.Fatal("usage ./main envName")
+		log.Fatal("usage (go run main.go envName output) - output is optional")
 	}
 
-	svcDynamoDB := newDynamoDBClient()
-	for _, tableName := range tableNames {
-		writeTableToJson(svcDynamoDB, tableName)
+	if len(os.Args) > 2 {
+		output = os.Args[2]
+	} else {
+		output = "all"
 	}
 
-	svcS3 := newS3Client()
-	for _, bucketName := range bucketNames {
-		downloadAllObjects(svcS3, bucketName)
+	if output == "all" || output == "dynamodb" {
+		svcDynamoDB := newDynamoDBClient()
+		for _, tableName := range tableNames {
+			writeTableToJson(svcDynamoDB, tableName)
+		}
+	}
+
+	if output == "all" || output == "s3" {
+		svcS3 := newS3Client()
+		for _, bucketName := range bucketNames {
+			downloadAllObjects(svcS3, bucketName)
+		}
+	}
+
+	if output == "all" || output == "cognito" {
+		svcParameterStoreClient := newParameterStoreClient()
+		svcCognito := newCognitoClient()
+		writeCognitoToJson(svcCognito, svcParameterStoreClient)
 	}
 }
